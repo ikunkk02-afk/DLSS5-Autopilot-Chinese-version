@@ -51,6 +51,39 @@ def set_(key: str, value) -> None:
     save(d)
 
 
+_FEEDER_NAMES = {"dlss5-feed.addon64", "dlss5-feed.addon32"}
+_FEEDER_MARKERS = (
+    b"DLSS 5 Feed",
+    b"DLSS5_Feed.fx",
+    b"Feeds DLSS 5 neural rendering",
+    b"dlss5-feed.cfg",
+)
+_RENODX_DLSS5_MARKERS = (
+    b"RenoDX.DLSS5",
+    b"DLSS 5 Neural Rendering",
+    b"DLSS5 Generic",
+    b"renodx-dlss5.addon64",
+)
+
+
+def _has_marker(data: bytes, marker: bytes) -> bool:
+    """Find an ASCII or UTF-16LE identity string in a PE image."""
+    return marker in data or marker.decode("ascii").encode("utf-16-le") in data
+
+
+def is_dlss5_feeder(path: Path) -> bool:
+    """Identify DLSS5-Feeder by its embedded module strings, not its name."""
+    try:
+        if not path.is_file() or path.stat().st_size < 100_000:
+            return False
+        data = path.read_bytes()
+        return data[:2] == b"MZ" and sum(
+            _has_marker(data, marker) for marker in _FEEDER_MARKERS
+        ) >= 2
+    except OSError:
+        return False
+
+
 def is_renodx(path: Path) -> bool:
     """Is this actually a RenoDX DLSS 5 add-on (either family)?
 
@@ -64,7 +97,21 @@ def is_renodx(path: Path) -> bool:
         data = path.read_bytes()
         if data[:2] != b"MZ":
             return False
-        return b"RenoDX" in data and b"DLSS" in data
+        # The well-known names are rejected immediately, but the embedded
+        # identity check below is what also catches a renamed feeder binary.
+        if path.name.lower() in _FEEDER_NAMES:
+            return False
+        if any(_has_marker(data, marker) for marker in _FEEDER_MARKERS):
+            return False
+        # A generic RenoDX/DLSS mention is shared by the feeder because it
+        # discovers and configures RenoDX. Require the add-on's own internal
+        # section/module strings instead.
+        dlss5_identity = sum(_has_marker(data, marker)
+                             for marker in _RENODX_DLSS5_MARKERS) >= 2
+        sf_identity = (_has_marker(data, b"renodx-dlss.addon64")
+                       and _has_marker(data, b"RenoDX")
+                       and _has_marker(data, b"DLSS"))
+        return dlss5_identity or sf_identity
     except OSError:
         return False
 
@@ -137,7 +184,10 @@ def find_renodx(sf: bool = False) -> tuple[Path | None, list[Path]]:
     saved = get("renodx_local")
     if saved:
         p = Path(saved)
-        if p.is_file() and is_renodx_sf(p) == sf:
+        # "not the SF family" does not imply "valid DLSS5 RenoDX". The old
+        # equality-only condition accepted every invalid remembered add-on
+        # when sf=False, including DLSS5-Feeder itself.
+        if p.is_file() and is_renodx(p) and is_renodx_sf(p) == sf:
             others = [c for c in cands if c.resolve() != p.resolve()]
             return p, [p] + others
     return (cands[0] if cands else None), cands

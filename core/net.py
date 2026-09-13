@@ -50,7 +50,8 @@ def untrusted(name: str, e: Exception) -> RuntimeError | None:
     if "CERTIFICATE_VERIFY_FAILED" not in str(e):
         return None
     return RuntimeError(
-        f"{name}: Windows does not trust GitHub's certificate ({e}). Open "
+        f"{name}: HTTPS / certificate connection failed ({e}). Windows does "
+        f"not trust GitHub's certificate. Open "
         f"https://github.com once in Edge (Windows fetches a missing root "
         f"certificate the first time a Microsoft program needs it), then "
         f"try again. An antivirus that inspects HTTPS causes this too - "
@@ -358,11 +359,15 @@ def fetch_text(url: str, _try: int = 0) -> bytes:
         # (HTTPError is a URLError; the checks below apply to it only)
         # Same anonymous API allowance as sources._get; keep the message
         # identical so the user sees one clear explanation either way.
-        if e.code in (403, 429) and "api.github.com" in url:
+        if e.code == 403 and "api.github.com" in url:
             raise sources.RateLimited(
-                "GitHub is rate limiting this connection (60 anonymous API "
-                "requests per hour). Wait an hour and try again, or use a VPN / "
-                "different network. Downloads already in the cache still work."
+                "GitHub API request was rejected (HTTP 403). Cached version "
+                "lists and already downloaded files can still be used."
+            ) from e
+        if e.code == 429 and "api.github.com" in url:
+            raise sources.RateLimited(
+                "GitHub API request rate limited (HTTP 429). Cached version "
+                "lists and already downloaded files can still be used."
             ) from e
         if e.code in RETRY_CODES:
             host = url.split("/")[2] if "/" in url else url

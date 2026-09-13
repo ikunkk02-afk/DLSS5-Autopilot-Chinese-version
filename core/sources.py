@@ -188,11 +188,15 @@ def _get(url: str, timeout: int = 60, attempts: int = 3) -> bytes:
                                         context=net.ssl_context()) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
-            if e.code in (403, 429) and "api.github.com" in url:
+            if e.code == 403 and "api.github.com" in url:
                 raise RateLimited(
-                    "GitHub is rate limiting this connection (60 anonymous API "
-                    "requests per hour). Wait an hour and try again, or use a VPN / "
-                    "different network. Downloads already in the cache still work."
+                    "GitHub API request was rejected (HTTP 403). Cached version "
+                    "lists and already downloaded files can still be used."
+                ) from e
+            if e.code == 429 and "api.github.com" in url:
+                raise RateLimited(
+                    "GitHub API request rate limited (HTTP 429). Cached version "
+                    "lists and already downloaded files can still be used."
                 ) from e
             if e.code in RETRY_CODES:
                 last = e
@@ -216,7 +220,7 @@ def _get(url: str, timeout: int = 60, attempts: int = 3) -> bytes:
                 from . import net
                 if net.untrusted(url.split("/")[2], e):
                     raise net.untrusted(url.split("/")[2], e) from e
-                raise
+                raise Unavailable(f"Unable to connect to GitHub ({e}).") from e
             time.sleep(2.0 * (attempt + 1))
     raise last if last else RuntimeError(url)
 
@@ -283,9 +287,8 @@ def _json(url: str):
             # Nothing cached to fall back to: report why the LIVE call failed,
             # not the missing cache file - that would be a misleading error.
             raise original from None
-        last_fallback = (f"GitHub could not be reached (rate limit or no "
-                         f"connection); using the version list cached "
-                         f"{age_h}h ago.")
+        last_fallback = (f"Online version list update failed; using cache from "
+                         f"{age_h} hours ago.")
         return data
 
 

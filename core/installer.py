@@ -744,6 +744,55 @@ def _copy(src: Path, dst: Path, rep: Report, root: Path) -> None:
         rep.written.append(str(dst))
 
 
+def _download_resource(url: str, name: str, progress=None) -> Path:
+    """Download one named asset and retain its source in any failure."""
+    try:
+        return net.download(url, name, progress=progress)
+    except Exception as e:
+        raise InstallError(
+            f"Resource download failed: {name}\nSource URL: {url}\n{e}"
+        ) from e
+
+
+def _reject_if_feeder_duplicate(root: Path, candidate: Path) -> None:
+    """Stop a feeder binary from crossing the RenoDX install boundary."""
+    if not candidate.is_file():
+        return
+    for name in (FEEDER_ADDON64, FEEDER_ADDON32):
+        feeder = root / name
+        if feeder.is_file() and net.sha256(feeder) == net.sha256(candidate):
+            raise InstallError(
+                "Detected that the RenoDX plug-in and DLSS5-Feeder are the "
+                "same file; the incorrect installation was blocked.")
+
+
+def _validate_neural_addons(root: Path, dlss_dir: Path, opt: Options,
+                            x64: bool) -> None:
+    """Final identity/hash gate before an install may be marked complete."""
+    if opt.path in (OPTI, UPSTREAM, STANDALONE, ROUTE_REMIX):
+        return
+
+    addon_name = RENODX_SF if opt.path == ROUTE_RENODX else RENODX
+    renodx = dlss_dir / addon_name
+    valid = prefs.is_renodx_sf(renodx) if opt.path == ROUTE_RENODX \
+        else prefs.is_renodx(renodx)
+    if not valid:
+        _reject_if_feeder_duplicate(root, renodx)
+        raise InstallError(
+            "RenoDX plug-in validation failed; the file is not a genuine "
+            "RenoDX DLSS5 add-on.")
+
+    if opt.path == FEEDER:
+        feeder = root / (FEEDER_ADDON64 if x64 else FEEDER_ADDON32)
+        if not prefs.is_dlss5_feeder(feeder):
+            raise InstallError(
+                "DLSS5-Feeder plug-in validation failed; installation was blocked.")
+        if net.sha256(feeder) == net.sha256(renodx):
+            raise InstallError(
+                "Detected that the RenoDX plug-in and DLSS5-Feeder are the "
+                "same file; the incorrect installation was blocked.")
+
+
 # ---------------------------------------------------------------- plan
 
 def _opti_needs_dlss(opt: Options) -> bool:
@@ -2092,7 +2141,7 @@ def install(g: games.Game, opt: Options, on_step=None, on_prog=None, on_log=None
             pct = int(done * 100 / total) if total else 0
             prog(pct, f"{fname} - {net.human(done)}"
                       + (f" / {net.human(total)}" if total else ""))
-        return net.download(url, fname, progress=p)
+        return _download_resource(url, fname, progress=p)
 
     # Every step below can fail (network, rate limit, permissions). If it
     # does, we still record the files already written - otherwise they would
@@ -2543,6 +2592,25 @@ def install(g: games.Game, opt: Options, on_step=None, on_prog=None, on_log=None
                 if found:
                     opt.renodx_local = found
                     log(f"      found a local renodx build: {found.name}")
+            # Validate an explicitly selected/remembered file even when the
+            # OpenGL pin below will replace it. This is the second boundary:
+            # a feeder renamed to a RenoDX-looking name must never silently
+            # turn into a successful local RenoDX install.
+            if opt.renodx_local:
+                selected = Path(opt.renodx_local)
+                _reject_if_feeder_duplicate(root, selected)
+                selected_valid = prefs.is_renodx_sf(selected) if sf \
+                    else prefs.is_renodx(selected)
+                if not selected_valid:
+                    raise InstallError(
+                        "The selected local file is not a genuine RenoDX add-on; "
+                        "the installation was blocked.")
+            if g.api == "OpenGL" and not sf:
+                if opt.renodx_local:
+                    log("      OpenGL requires the catalogued renodx-dlss5 4.60 "
+                        "asset; the local build has no verifiable release label")
+                opt.renodx_local = None
+                opt.renodx = sources.OPENGL_RENODX_PIN
             if opt.renodx_local:
                 src = Path(opt.renodx_local)
                 if not src.is_file():
@@ -2564,6 +2632,8 @@ def install(g: games.Game, opt: Options, on_step=None, on_prog=None, on_log=None
                 e = sources.pick(fam, opt.renodx)
                 f = dl(e["url"], f"renodx-sf-{e['label']}.zip")
                 _extract(f, ".addon64", dlss_dir / RENODX_SF, rep, root)
+                if not prefs.is_renodx_sf(dlss_dir / RENODX_SF):
+                    raise InstallError("The downloaded renodx-dlss (SF) asset failed plug-in identity validation.")
                 rep.written.append(str((dlss_dir / RENODX_SF).relative_to(root)))
                 log(f"      renodx-dlss SF {e['label']}")
                 rep.notes.append(f"renodx-dlss SF version: {e['label']}")
@@ -2603,9 +2673,30 @@ def install(g: games.Game, opt: Options, on_step=None, on_prog=None, on_log=None
                         rep.notes.append(f"renodx-dlss5 pinned to {want} for this "
                                          f"feeder release - newer builds conflict "
                                          f"with it")
-                e = sources.pick(catalog["renodx"], want)
-                f = dl(e["url"], f"renodx-{e['label']}.zip")
-                _extract(f, ".addon64", dlss_dir / RENODX, rep, root)
+                try:
+                    if g.api == "OpenGL" and want == sources.OPENGL_RENODX_PIN:
+                        e = next((entry for entry in catalog["renodx"]
+                                  if entry.get("label") == want
+                                  or entry.get("tag") == want), None)
+                        if e is None:
+                            raise InstallError(
+                                "The online/cache catalog has no exact "
+                                f"renodx-dlss5 {want} asset.")
+                    else:
+                        e = sources.pick(catalog["renodx"], want)
+                    f = dl(e["url"], f"renodx-{e['label']}.zip")
+                    _extract(f, ".addon64", dlss_dir / RENODX, rep, root)
+                    _reject_if_feeder_duplicate(root, dlss_dir / RENODX)
+                    if not prefs.is_renodx(dlss_dir / RENODX):
+                        raise InstallError(
+                            "The downloaded RenoDX asset failed plug-in identity validation.")
+                except Exception as error:
+                    if g.api == "OpenGL" and want == sources.OPENGL_RENODX_PIN:
+                        raise InstallError(
+                            "RenoDX DLSS5 4.60 acquisition failed; the OpenGL "
+                            f"neural-rendering component was not installed.\n{error}"
+                        ) from error
+                    raise
                 rep.written.append(str((dlss_dir / RENODX).relative_to(root)))
                 log(f"      renodx-dlss5 {e['label']}")
                 rep.notes.append(f"renodx version: {e['label']}")
@@ -2938,6 +3029,8 @@ def install(g: games.Game, opt: Options, on_step=None, on_prog=None, on_log=None
             if not opt.native_dlss:
                 log("      the bridge will build a synthetic contract from the "
                     "driver's optical flow engine")
+
+        _validate_neural_addons(root, dlss_dir, opt, x64)
 
     except PermissionError as e:
         _write_manifest(root, g, opt, rep, proxy, level, complete=False)

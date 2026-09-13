@@ -836,7 +836,9 @@ shutil.rmtree(d, ignore_errors=True)
 # The SF add-on is told apart from renodx-dlss5 by content, not by name.
 d = Path(tempfile.mkdtemp(prefix="sf_"))
 (d / "a.addon64").write_bytes(b"MZ" + bytes(300_000) + b"RenoDX DLSS renodx-dlss.addon64")
-(d / "b.addon64").write_bytes(b"MZ" + bytes(300_000) + b"RenoDX DLSS renodx-dlss5.addon64")
+(d / "b.addon64").write_bytes(b"MZ" + bytes(300_000)
+                                + b"RenoDX.DLSS5 DLSS 5 Neural Rendering "
+                                + b"DLSS5 Generic renodx-dlss5.addon64")
 check("sf build recognised", prefs.is_renodx_sf(d / "a.addon64"))
 check("renodx-dlss5 is not mistaken for sf", not prefs.is_renodx_sf(d / "b.addon64"))
 shutil.rmtree(d, ignore_errors=True)
